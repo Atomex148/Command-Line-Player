@@ -1,5 +1,5 @@
 ﻿#include "headers.hpp"
-#include "Player.h"
+#include "Player.hpp"
 
 int main() {
     Player player;

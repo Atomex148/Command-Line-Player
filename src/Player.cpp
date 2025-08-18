@@ -1,30 +1,21 @@
-#include "Player.h"
+﻿#include "Player.hpp"
 
-std::vector<std::pair<std::wstring, std::filesystem::path>> Player::readMusicList() {
-    std::filesystem::path musicPath = appPath.wstring() + L"/music";
-    std::vector<std::pair<std::wstring, std::filesystem::path>> musicList = { };
+std::unordered_map<std::wstring, std::filesystem::path> Player::readMusicList() {
+    std::filesystem::path musicPath = appPath.wstring() + L"\\music";
+    std::unordered_map<std::wstring, std::filesystem::path> musicList = { };
 
     for (const auto& entry : std::filesystem::directory_iterator(musicPath)) {
         if (std::filesystem::is_regular_file(entry.status()) && entry.path().extension() == L".mp3") {
-            musicList.push_back({ recieveSongName(entry.path()), entry.path()});
+            std::optional<std::wstring> songName = recieveSongName(entry.path());
+            if (songName) musicList[*songName] = entry.path();
         }
     }
 
     return musicList;
 }
 
-MP3_Header Player::recieveHeader(uint8_t bytes[10]) {
-    MP3_Header header;
-    std::memcpy(header.fileID, bytes, 3);
-    header.verMajor = bytes[3];
-    header.verMinor = bytes[4];
-    header.flags = bytes[5];
-    header.tagSize = ((bytes[6] & 0x7F) << 21 | (bytes[7] & 0x7F) << 14 | (bytes[8] & 0x7F) << 7 | (bytes[9] & 0x7F));
-    return header;
-}
-
-std::wstring Player::recieveSongName(std::filesystem::path pathToSong) {
-    std::ifstream file(pathToSong);
+std::optional<std::wstring> Player::recieveSongName(std::filesystem::path pathToSong) {
+    std::ifstream file(pathToSong, std::ios::binary);
     if (!file) return L"";
 
     file.seekg(0, std::ios::end);
@@ -32,12 +23,13 @@ std::wstring Player::recieveSongName(std::filesystem::path pathToSong) {
     file.seekg(0, std::ios::beg);
     
     std::array<uint8_t, 10> headerData;
-    if (!file.read(reinterpret_cast<char*>(headerData.data()), 10)) return L"";
+    if (!file.read(reinterpret_cast<char*>(headerData.data()), 10)) return std::nullopt;
     MP3_Header header = recieveHeader(headerData.data());
+    if (std::memcmp(header.fileID, "ID3", 3) != 0) return std::nullopt;
     
     std::vector<uint8_t> data(header.tagSize);
     file.seekg(10, std::ios::beg);
-    if (!file.read(reinterpret_cast<char*>(data.data()), header.tagSize)) return L"";
+    if (!file.read(reinterpret_cast<char*>(data.data()), header.tagSize)) return std::nullopt;
 
     size_t pos = 0;
     std::pair<std::wstring, std::wstring> songArtistAndName;
@@ -99,47 +91,170 @@ std::wstring Player::recieveSongName(std::filesystem::path pathToSong) {
     return songArtistAndName.first + L" - " + songArtistAndName.second;
 }
 
+
 Player::Player() {
-    auto name = Renderer([&] { return hbox(text(L"MP3 Player") | center | flex) | border | xflex; });
+    if (!std::filesystem::exists(appPath.wstring() + L"\\music")) {
+        std::filesystem::create_directory(appPath.wstring() + L"\\music");
+    }
+
+    auto name = Renderer([&] { return hbox(text(L"MP3 Player") | center | flex | bold) | border | xflex; });
     auto terminalSize = Terminal::Size();
 
-    auto musicList = readMusicList();
+    musicList = readMusicList();
     int selected = 0;
-    MenuOption option;
 
     std::vector<std::wstring> musicNames;
     for (const auto& [name, path] : musicList)
         musicNames.push_back(name);
 
-    auto menu = Menu(&musicNames, &selected, option);
-    auto button = Button(L"Refresh playlist!", [](){});
-    
-    auto controls = Container::Vertical({ menu, button });
+    auto menu = Menu(&musicNames, &selected, MenuOption::Vertical());
+    auto refreshButton = Button(L"Refresh playlist!", [&](){
+        selected = 0;
+        musicNames.clear();
+        musicList = readMusicList();
+        for (const auto& [name, path] : musicList)
+            musicNames.push_back(name);
 
-    auto musicPane = Renderer(controls, [&] {
+        });
+    
+    auto musicPaneControls = Container::Vertical({ menu, refreshButton });
+
+    auto musicPane = Renderer(musicPaneControls, [&] {
         return
             vbox(
                 text("Music List") | center | bold,
                 separator(),
                 menu->Render(),
                 filler(),
-                button->Render()
+                refreshButton->Render()
             ) | border | size(WIDTH, EQUAL, terminalSize.dimx / 3);
         });
 
-    auto playerPane = Renderer([&] {
+    auto playButton = Button(L"▶", [&] {
+        if (!musicNames.empty()) {
+            currentlyPlaying = musicNames[selected];
+            sm.play(this->musicList[musicNames[selected]]);
+        }
+    });
+    auto pauseButton = Button(L"∥", [&] {
+        sm.pause();
+    });
+    auto stopButton = Button(L"■", [&] {
+        currentlyPlaying.clear();
+        sm.stop();
+    });
+
+    Box volumeSliderBox;
+    auto volumeSlider = Slider<int>({.value = &volumeSliderValue, .min = 0,.max = 100, .increment = 1, .direction = Direction::Up}) | 
+        CatchEvent([&](Event event) {
+            auto mouse = event.mouse();
+            if (mouse.x >= volumeSliderBox.x_min && mouse.x <= volumeSliderBox.x_max &&
+                mouse.y >= volumeSliderBox.y_min && mouse.y <= volumeSliderBox.y_max || userVolumeDragging)
+            {
+                if (event.is_mouse()) {
+                    if (event.mouse().button == Mouse::Left) {
+                        if (event.mouse().motion == Mouse::Pressed) {
+                            userVolumeDragging = true;
+                        }
+                        else if (event.mouse().motion == Mouse::Released) {
+                            if (userVolumeDragging) {
+                                sm.changeVolume(volumeSliderValue);
+                                userVolumeDragging = false;
+                            }
+                        }
+                    }
+                }
+            }
+            return false;
+        }) |
+        Renderer([&](Element e) {
+            return e | reflect(volumeSliderBox);
+        });
+    auto volumeUpButton = Button(L" +", [&] {
+        if (volumeSliderValue < 100) {
+            volumeSliderValue++;
+            sm.changeVolume(volumeSliderValue);
+        }
+        
+    });
+    auto volumeDownButton = Button(L" -", [&] {
+        if (volumeSliderValue > 0) {
+            volumeSliderValue--;
+            sm.changeVolume(volumeSliderValue);
+        }
+    });
+
+    Box songProgressSliderBox;
+    auto songProgressSlider = Slider("", &songProgressSliderValue, 0, 100, 1) | 
+        CatchEvent([&](Event event) {
+            auto mouse = event.mouse();
+            if (mouse.x >= songProgressSliderBox.x_min && mouse.x <= songProgressSliderBox.x_max &&
+                mouse.y >= songProgressSliderBox.y_min && mouse.y <= songProgressSliderBox.y_max || userSongProgressDragging)
+            {
+                if (event.is_mouse()) {
+                    if (event.mouse().button == Mouse::Left) {
+                        if (event.mouse().motion == Mouse::Pressed) {
+                            userSongProgressDragging = true;
+                        }
+                        else if (event.mouse().motion == Mouse::Released) {
+                            if (userSongProgressDragging) {
+                                sm.seekTo(songProgressSliderValue);
+                                userSongProgressDragging = false;
+                            }
+                        }
+                    }
+                }
+            }
+            return false;
+        }) | 
+        Renderer([&](Element e) {
+            return e | reflect(songProgressSliderBox);
+        });
+
+    auto playerPaneControls = Container::Vertical({ playButton, pauseButton, stopButton, songProgressSlider, volumeUpButton,
+                                                    volumeDownButton, volumeSlider });
+
+    auto playerPane = Renderer(playerPaneControls, [&] {
         return
             vbox(
-                text(L"")
+                filler(),
+                vbox(
+                    songProgressSlider->Render() | flex | border,
+                    text(currentlyPlaying) | center,
+                    text(sm.fromDoubleToTime(sm.getTimeElapsed()) + L"/" + sm.fromDoubleToTime(sm.getSongDuration())) | center
+                ),
+                filler(),
+                hbox(
+                    vbox(
+                        filler() | size(HEIGHT, EQUAL, 2),
+                        hbox(
+                            playButton->Render() | flex,
+                            pauseButton->Render() | flex | bold,
+                            stopButton->Render() | flex | color(Color::Red)
+                        ) | xflex,
+                        filler() | size(HEIGHT, EQUAL, 1)
+                    ) | flex | size(HEIGHT, EQUAL, 5),
+                    vbox(
+                        volumeUpButton->Render() | flex,
+                        text(std::to_wstring(volumeSliderValue)) | center,
+                        volumeDownButton->Render() | flex
+                    ) | size(WIDTH, EQUAL, 5),
+                    volumeSlider->Render() | size(HEIGHT, EQUAL, 5) | border
+                )
             ) | border | size(WIDTH, EQUAL, 2 * terminalSize.dimx / 3);
         }
     );
-
     layout = Container::Vertical({ name, Container::Horizontal({musicPane, playerPane}) | flex });
+
+    std::thread timerThread([&] {
+        while (true) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            if (!userSongProgressDragging) songProgressSliderValue = sm.getProgress() * 100;
+            screen.Post(Event::Custom);
+        }
+    });
+    timerThread.detach();
 
     screen.Loop(layout);
 }
 
-void Player::run()
-{
-}
