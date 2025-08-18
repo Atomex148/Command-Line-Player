@@ -14,11 +14,13 @@ private:
 	ScreenInteractive screen = ScreenInteractive::Fullscreen();
 	Component layout;
 
+	std::thread timerThread;
 	std::atomic<bool> stopUpdateTimer = false;
 
 	std::unordered_map<std::wstring, std::filesystem::path> readMusicList();
 	std::optional<std::wstring> recieveSongName(std::filesystem::path pathToSong);
 public:
 	Player();
+	~Player();
 };
 

@@ -27,6 +27,7 @@ private:
     static void soundCallback(void* userdata, uint8_t* stream, int len);
 public:
     SoundModule();
+    ~SoundModule();
 
     void play(const std::filesystem::path& pathToSong);
     void pause();

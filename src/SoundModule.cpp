@@ -228,6 +228,33 @@ SoundModule::SoundModule() {
 	});
 }
 
+SoundModule::~SoundModule() {
+    {
+        std::lock_guard<std::mutex> stopLock(stopCvMutex);
+        stopCv.notify_one();
+    }
+
+    playCv.notify_one();
+    pauseCv.notify_one();
+
+    exitThread.store(true);
+    if (musicThread.joinable()) musicThread.join();
+
+    if (deviceId != 0) {
+        SDL_CloseAudioDevice(deviceId);
+        deviceId = 0;
+    }
+
+    {
+        std::lock_guard<std::mutex> bufferLock(callbackBufferMutex);
+        callbackBuffer.clear();
+    }
+    currentSong.clear();
+    songBuffer.clear();
+
+    SDL_QuitSubSystem(SDL_INIT_AUDIO);
+}
+
 void SoundModule::play(const std::filesystem::path& pathToSong) {
     if (shouldPlay.load()) {
         shouldPlay.store(false);

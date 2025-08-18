@@ -246,15 +246,19 @@ Player::Player() {
     );
     layout = Container::Vertical({ name, Container::Horizontal({musicPane, playerPane}) | flex });
 
-    std::thread timerThread([&] {
-        while (true) {
+    timerThread = std::thread([&] {
+        while (!stopUpdateTimer.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             if (!userSongProgressDragging) songProgressSliderValue = sm.getProgress() * 100;
             screen.Post(Event::Custom);
         }
     });
-    timerThread.detach();
 
     screen.Loop(layout);
+}
+
+Player::~Player() {
+    stopUpdateTimer.store(true);
+    if (timerThread.joinable()) timerThread.join();
 }
 
