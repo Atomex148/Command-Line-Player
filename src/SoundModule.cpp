@@ -112,44 +112,8 @@ SoundModule::SoundModule() {
                 if (seekRequested.load()) {
                     std::lock_guard<std::mutex> seekLock(seekMutex);
                     seekRequested.store(false);
-
-                    MP3_Header header = recieveHeader(songBuffer.data());
-                    size_t songStart = 10 + header.tagSize;
-
-                    float newProgress = static_cast<float>(newSeekPosition.load()) / 100.0f;
-                    if (newProgress > 0.98f) {
-                        newProgress = 0.98f;
-                    }
-
-                    size_t songSize = songBuffer.size() - songStart;
-                    size_t newPosInBuffer = static_cast<size_t>(songSize * newProgress) + songStart;
-
-                    uint8_t* newMusicData = songBuffer.data() + newPosInBuffer;
-                    size_t newRemaining = songSize - newPosInBuffer;
-
-                    while (newRemaining > 0) {
-                        if ((*newMusicData & 0xFF) == 0xFF)
-                            break;
-                        newRemaining--;
-                        newMusicData++;
-                        newPosInBuffer++;
-                    }
-                    if (newRemaining > 0) {
-                        remaining = newRemaining;
-                        musicData = newMusicData;
-
-                        {
-                            std::lock_guard<std::mutex> timeLock(timeMutex);
-                            timeElapsed = std::chrono::duration<double>(
-                                (static_cast<double>(newPosInBuffer - songStart) / songSize) * currentSongDuration.count()
-                            );
-                        }
-
-                        {
-                            std::lock_guard<std::mutex> bufferLock(callbackBufferMutex);
-                            callbackBuffer.clear();
-                        }
-                    }
+                    if (progressSeek.load()) seekByProgress(musicData, remaining);
+                    else seekBySeconds(musicData, remaining);
                 }
 
                 int samples = mp3dec_decode_frame(&mp3d, musicData, remaining, pcm, &info);
@@ -212,6 +176,26 @@ SoundModule::SoundModule() {
             while (!callbackBuffer.empty() && shouldPlay.load()) {
                 SDL_Delay(10);
             }
+            
+            {
+                std::lock_guard<std::mutex> bufferLock(callbackBufferMutex);
+                std::vector<uint16_t>().swap(callbackBuffer);
+                std::vector<uint8_t>().swap(songBuffer);
+            }
+
+            if (songEndingCallback != nullptr && shouldPlay.load()) {
+                songEndingCallback();
+            }
+
+            bool hasMoreSongs = false;
+            {
+                std::lock_guard<std::mutex> queueLock(musicQueueMutex);
+                hasMoreSongs = !musicQueue.empty();
+            }
+
+            if (hasMoreSongs) {
+                continue;
+            }
 
             if (deviceId != 0) {
                 SDL_CloseAudioDevice(deviceId);
@@ -253,6 +237,10 @@ SoundModule::~SoundModule() {
     songBuffer.clear();
 
     SDL_QuitSubSystem(SDL_INIT_AUDIO);
+}
+
+void SoundModule::setOnSongFinishedCallback(std::function<void()> callback) {
+    songEndingCallback = callback;
 }
 
 void SoundModule::play(const std::filesystem::path& pathToSong) {
@@ -301,10 +289,10 @@ void SoundModule::stop() {
 
     {
         std::lock_guard<std::mutex> bufferLock(callbackBufferMutex);
-        callbackBuffer.clear();
+        std::vector<uint16_t>().swap(callbackBuffer);
+        std::vector<uint8_t>().swap(songBuffer);
     }
 
-    songBuffer.clear();
     currentSong.clear();
     shouldPlay.store(false);
 }
@@ -313,6 +301,87 @@ double SoundModule::getSongDuration() {
     std::lock_guard<std::mutex> timeLock(timeMutex);
     if (currentSongDuration == std::chrono::seconds(0)) return 0.0;
     return currentSongDuration.count();
+}
+
+void SoundModule::seekByProgress(uint8_t*& musicData, size_t& remaining) {
+    MP3_Header header = recieveHeader(songBuffer.data());
+    size_t songStart = 10 + header.tagSize;
+
+    float newProgress = static_cast<float>(newSeekPosition.load()) / 100.0f;
+    if (newProgress > 0.99f) {
+        newProgress = 0.99f;
+    }
+
+    size_t songSize = songBuffer.size() - songStart;
+    size_t newPosInBuffer = static_cast<size_t>(songSize * newProgress) + songStart;
+
+    uint8_t* newMusicData = songBuffer.data() + newPosInBuffer;
+    size_t newRemaining = songSize - (newPosInBuffer - songStart);
+
+    while (newRemaining > 0) {
+        if ((*newMusicData & 0xFF) == 0xFF)
+            break;
+        newRemaining--;
+        newMusicData++;
+        newPosInBuffer++;
+    }
+    if (newRemaining > 0) {
+        remaining = newRemaining;
+        musicData = newMusicData;
+
+        {
+            std::lock_guard<std::mutex> timeLock(timeMutex);
+            timeElapsed = std::chrono::duration<double>(
+                (static_cast<double>(newPosInBuffer - songStart) / songSize) * currentSongDuration.count()
+            );
+        }
+
+        {
+            std::lock_guard<std::mutex> bufferLock(callbackBufferMutex);
+            callbackBuffer.clear();
+        }
+    }
+}
+
+void SoundModule::seekBySeconds(uint8_t*& musicData, size_t& remaining) {
+    double targetTime = seekToTime.load();
+    double totalDuration = getSongDuration();
+
+    if (targetTime < 0) targetTime = 0;
+    if (targetTime > totalDuration) targetTime = totalDuration;
+
+    double progress = targetTime / totalDuration;
+
+    MP3_Header header = recieveHeader(songBuffer.data());
+    size_t songStart = 10 + header.tagSize;
+    size_t songSize = songBuffer.size() - songStart;
+    size_t newPosInBuffer = static_cast<size_t>(songSize * progress) + songStart;
+
+    uint8_t* newMusicData = songBuffer.data() + newPosInBuffer;
+    size_t newRemaining = songSize - (newPosInBuffer - songStart);
+
+    while (newRemaining > 0) {
+        if ((*newMusicData & 0xFF) == 0xFF)
+            break;
+        newRemaining--;
+        newMusicData++;
+        newPosInBuffer++;
+    }
+
+    if (newRemaining > 0) {
+        remaining = newRemaining;
+        musicData = newMusicData;
+
+        {
+            std::lock_guard<std::mutex> timeLock(timeMutex);
+            timeElapsed = std::chrono::duration<double>(targetTime);
+        }
+
+        {
+            std::lock_guard<std::mutex> bufferLock(callbackBufferMutex);
+            callbackBuffer.clear();
+        }
+    }
 }
 
 double SoundModule::songDuration(const std::filesystem::path& pathToSong) {
@@ -376,6 +445,10 @@ double SoundModule::getProgress() {
     return progress;
 }
 
+bool SoundModule::paused() {
+    return isPaused.load();
+}
+
 void SoundModule::seekTo(int newProgressPoint) {
     if (!shouldPlay.load()) return;
     if (newProgressPoint < 0) newProgressPoint = 0;
@@ -383,6 +456,23 @@ void SoundModule::seekTo(int newProgressPoint) {
 
     std::lock_guard<std::mutex> seekLock(seekMutex);
     newSeekPosition.store(newProgressPoint);
+    progressSeek.store(true);
+    seekRequested.store(true);
+}
+
+void SoundModule::seekToSeconds(int secondsFromCurrentPoint) {
+    if (!shouldPlay.load()) return;
+
+    double currentTime = getTimeElapsed();
+    double newTime = currentTime + secondsFromCurrentPoint;
+
+    if (newTime < 0) newTime = 0;
+    double maxTime = getSongDuration();
+    if (newTime > maxTime) newTime = maxTime;
+
+    std::lock_guard<std::mutex> seekLock(seekMutex);
+    seekToTime.store(newTime);
+    progressSeek.store(false);          
     seekRequested.store(true);
 }
 
