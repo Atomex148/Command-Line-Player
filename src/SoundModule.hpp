@@ -1,6 +1,5 @@
 #pragma once
 #include "headers.hpp"
-#include "CircularBuffer.h"
 
 class SoundModule {
 private:
@@ -12,7 +11,6 @@ private:
     std::vector<uint16_t> callbackBuffer;
     std::chrono::duration<double> timeElapsed = std::chrono::seconds(0), currentSongDuration = std::chrono::seconds(0);
 
-    CircularBuffer<uint8_t> circularBuffer{2048};
 
     std::condition_variable playCv, pauseCv, stopCv, seekCv;
     std::mutex musicQueueMutex, playCvMutex, stopCvMutex, seekCvMutex, pauseMutex, timeMutex, seekMutex, callbackBufferMutex;
