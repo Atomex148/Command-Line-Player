@@ -2,6 +2,12 @@
 #include "Player.hpp"
 
 int main() {
-    Player player;
+    try {
+        Player player;
+    }
+    catch (...) {
+        std::cerr << "CLP startup has been failed\n";
+        return 1;
+    }
     return 0;
 }
